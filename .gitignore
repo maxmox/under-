@@ -3,3 +3,6 @@ cache/
 __pycache__/
 *.csv
 *.log
+
+# o dataset empacotado VAI para o repo
+!dados/futebol.db.gz
