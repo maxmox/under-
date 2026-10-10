@@ -7,3 +7,6 @@ __pycache__/
 # o dataset empacotado VAI para o repo
 !dados/futebol.db.gz
 .venv/
+*.db-journal
+*.db-wal
+*.db-shm
