@@ -1,202 +1,154 @@
-# Under Limite Lab — odd justa minuto a minuto
+# Under Limite Lab
 
-Projeto **independente** do dashboard de backtests. Objetivo: reconstruir o
-estado de um jogo em qualquer minuto a partir de dados gratuitos e calcular a
-**odd justa do under limite HT e FT** nesse momento.
+Banco de dados de jogos com **minuto exato de cada chute e gol**, odds
+pre-live, e dois motores de precificacao do under limite (linha = placar + 0,5,
+mercado "nao sai mais gol ate o fim do periodo"):
 
-Mercado modelado: *"nao sai mais nenhum gol ate o fim do periodo"* — a linha e
-sempre `placar + 0,5`.
+- **Motor 1 — empirico.** Conta o que aconteceu. "Jogos que estavam nesta
+  situacao — mesmo minuto, mesmo placar em relacao ao favorito, favoritismo
+  parecido — em quantos % o placar nao mudou ate o fim do periodo?"
+  **Integrado ao Scanner do site Futebol.**
+- **Motor 2 — funcao calibrada.** Modelo suave que reproduz o Motor 1 onde
+  ha amostra e estima onde nao ha. *A ser refeito* (`motor.py` e o piloto
+  antigo, ver *Motor 2* abaixo).
 
-**Estado: piloto de 1 temporada concluido (EPL 2024).** A infraestrutura esta
-validada ponta a ponta; o modelo **ainda nao** demonstrou ganho sobre o
-baseline com esse volume. Ver *Resultado do piloto*.
-
-## Como rodar
+## Pipeline
 
 ```bash
-python coletar_understat.py EPL 2024   # jogos + chutes -> futebol.db
-python coletar_odds.py E0 2425         # odds pre-live + casamento
-python ajustar.py                      # busca em grade + ablacao
-python avaliar.py                      # diagnostico, calibragem, exemplo
+python baixar.py          # Understat -> cache/ (paralelo, resumivel, ~2 h do zero)
+python carregar.py        # cache/ -> futebol.db (sem rede)
+python coletar_odds.py    # football-data.co.uk -> odds pre-live + placar do intervalo
+python consolidar.py      # corrige o tempo dos gols pelo placar oficial do intervalo
+python exportar_web.py --publicar ../Futebol   # JSON do Motor 1 -> site
+python dataset.py exportar                     # futebol.db -> dados/futebol.db.gz
 ```
+
+Para so usar o banco, sem coletar: `python dataset.py restaurar`.
 
 ## Fontes
 
-### Understat (minuto exato)
-
-API JSON interna, nao documentada. Exige o header
-`X-Requested-With: XMLHttpRequest` (sem ele devolve 404) e aceita gzip.
+**Understat** (minuto exato). API JSON interna, nao documentada; exige o header
+`X-Requested-With: XMLHttpRequest` (sem ele, 404):
 
 ```
 GET https://understat.com/main/getLeagueData/<LIGA>/<TEMPORADA>
-GET https://understat.com/main/getMatchData/<ID_DO_JOGO>
+GET https://understat.com/main/getMatchData/<ID>
 ```
 
-`getMatchData` devolve `shots.h` / `shots.a`, cada chute com `minute`,
-`result` (`Goal` / `SavedShot` / `BlockedShot` / `MissedShots` / `ShotOnPost`),
-`xG`, `X`/`Y` na grama, `situation`, `shotType` e jogador.
+Cada chute traz `id`, `minute`, `result`, `xG`, `X`/`Y`, `situation`,
+`shotType`, jogador. Cobertura: EPL, La_liga, Bundesliga, Serie_A, Ligue_1,
+RFPL, temporadas 2014–2026.
 
-Cobertura verificada: EPL, La_liga, Bundesliga, Serie_A, Ligue_1, RFPL —
-temporadas **2014 a 2026** (~24 mil jogos concluidos). A coleta de uma
-temporada da EPL (380 jogos) levou ~7 min a 1 request/s, sem nenhum erro.
+**football-data.co.uk** (pre-live). CSV por divisao/temporada:
+`https://www.football-data.co.uk/mmz4281/<1415>/<E0>.csv`. Uso: 1X2 e O/U 2.5
+(abertura e fechamento), Betfair Exchange, placar do intervalo (`HTHG/HTAG`),
+escanteios e vermelhos **finais** (sem minuto). Nao cobre a RFPL.
 
-### football-data.co.uk (odds pre-live)
+O casamento entre as duas fontes nao usa tabela de apelidos: os nomes sao
+casados por similaridade **dentro de cada liga-temporada** e cada par e
+**confirmado pelo placar final**. Divergencia de placar = jogo fora (pegou,
+por exemplo, um Sassuolo 2-1 em campo que virou 0-3 no tribunal).
 
-CSV por divisao e temporada, sem autenticacao (segue redirect, use `-L`):
+## Correcoes sobre o dado cru — todas medidas
 
-```
-https://www.football-data.co.uk/mmz4281/<TEMPORADA>/<DIV>.csv
-```
-
-| Grupo | Abertura | Fechamento |
+| Problema | Medida | Correcao |
 |---|---|---|
-| Match odds (favoritismo) | `B365H/D/A`, `PSH/D/A` | `B365CH/CD/CA`, `PSCH/CD/CA` |
-| Over/under 2.5 (perfil do jogo) | `B365>2.5`, `B365<2.5` | `B365C>2.5`, `B365C<2.5` |
-| Betfair Exchange | `BFE>2.5`, `BFE<2.5` | `BFEC>2.5`, `BFEC<2.5` |
+| **Gol contra** (`OwnGoal`) fica no lado de quem fez o contra | contando so `Goal`, o placar batia em 92,3% dos jogos | `gol_para` = adversario; placar bate em **99,83%** |
+| **Acrescimo do 1o tempo transborda**: 45+3 vira "48", igual ao 4o min do 2o tempo | o corte fixo em 45 erra o tempo de **2,34% dos gols do 1o tempo** — 3 jogos a cada 100 | o `id` do chute e cronologico (validado: **zero conflitos em 11.428 jogos**); os primeiros `HTHG+HTAG` gols sao do 1o tempo |
+| Placar reconstruido nao confere | 24 jogos (W.O. 3-0 sem chutes; chutes faltando) | `placar_confere = 0`, fora de toda contagem |
 
-Ambas sao pre-live; o **fechamento** e o preco imediatamente antes da bola
-rolar, portanto o balizador mais afiado. A Exchange importa porque e onde a
-comissao de 6,5% se aplica.
+`corte_ht` de cada jogo diz como o intervalo foi fixado: `placar_ht` (exato,
+87% do banco), `detectado` (virada do minuto visivel na ordem de `id`),
+`inferido` (corte em 45 — basicamente a RFPL, que nao entra no Motor 1).
 
-O casamento com o Understat e por data (com tolerancia de +-1 dia para jogo
-remarcado) e nome de time normalizado via tabela de apelidos em
-`coletar_odds.py`. Na EPL 2024: **380 de 380 jogos casaram**.
+Valor medido de gols no 1o tempo nessas ligas, com o corte exato: **43,7%**.
 
-## O que existe e o que nao existe minuto a minuto
+## O que existe minuto a minuto
 
-| Dado | Minuto a minuto | Observacao |
+| Dado | Minuto a minuto | Motor 1 |
 |---|---|---|
-| Gols / placar | **sim** | do `result == "Goal"` |
-| Chutes | **sim** | |
-| Chutes no alvo | **sim** | `Goal` + `SavedShot` |
-| xG acumulado | **sim** | por chute |
-| Escanteios | nao | so total final (`HC`/`AC`) |
-| Ataques perigosos | **nao existe** em fonte gratuita | |
-| Posse de bola | nao | so agregado final |
-| **Odd ao vivo** | **nao existe** historicamente | so coletando daqui pra frente |
+| Placar | **sim** | estado base |
+| Chutes, chutes no alvo | **sim** | filtro de ritmo |
+| xG | sim, mas **outro modelo que o do Fut Odds** | nao usado (escalas diferentes) |
+| Escanteios, vermelhos | so total do jogo | nao usado — filtrar por eles seria usar o futuro |
+| Ataques perigosos, posse, PI, APPM, CG | **nao existe** | declarado como "sem base" |
+| Odd ao vivo | **nao existe** historicamente | — |
 
-A ultima linha e a limitacao dura: o banco afere a **probabilidade** do modelo,
-nao o ROI realizado. Para ROI e preciso o preco, e preco ao vivo historico nao
-existe de graca.
+## Motor 1
 
-### Nota de dado: a borda do 1o tempo
+`motor1.py` e a referencia; `web/motor1.js` espelha linha a linha e e o que
+roda no site. `testes/test_paridade.py` confere que os dois dao o mesmo numero.
 
-O minuto do Understat e **0-indexado** (minuto 0 = 1o minuto de jogo) e vai
-ate 103.
+### Estado consultado
 
-O minuto 46 carrega uma **anomalia de 2,9x**: 30 gols contra 10,5 de media nos
-vizinhos. A escolha do corte foi feita pela fatia de gols do 1o tempo, cujo
-valor de livro e ~45%:
+- **Instante.** O Fut Odds mostra o minuto em andamento, 1-indexado; o Understat
+  rotula 0-indexado. O instante e `t = M - 1` e **o minuto em andamento conta
+  como futuro** — conservador para o under.
+- **Tempo.** `M <= 45` e 1o tempo; `M >= 46` e 2o; `HT` e o inicio do 2o.
+- **Favorito.** Maior probabilidade 1X2 **sem margem** (empate -> casa). O
+  placar e sempre lido como *gols do favorito x gols da zebra*: favorito
+  vencendo 1x0 e zebra vencendo 0x1 sao estados diferentes.
 
-| corte | fatia do 1o tempo |
+### Escada de relaxamento
+
+Minuto e placar relativo sao **sempre exatos**. Os outros filtros entram do
+mais especifico para o mais largo; vale o primeiro degrau com `n >= 100`:
+
+| degrau | favorito (prob.) | O/U 2.5 (prob.) | no alvo | chutes |
+|---|---|---|---|---|
+| 0 | ±0,03 | ±0,04 | ±25% | ±25% |
+| 1 | ±0,03 | ±0,04 | ±25% | |
+| 2 | ±0,03 | ±0,04 | | |
+| 3 | ±0,05 | ±0,07 | | |
+| 4 | ±0,05 | | | |
+| 5 | ±0,08 | | | |
+| 6 | ±0,12 | | | |
+| 7 | | | | |
+
+Degrau cujo filtro o Scanner nao trouxe vira copia do seguinte e e pulado; o
+rotulo exibido sai dos filtros **efetivamente aplicados**.
+
+### Saida
+
+`p` (taxa de green), `n`, `green`, `ic95` (Wilson), `justa = 1/p`, degrau e
+filtros usados, distribuicao de gols a mais (0 / 1 / 2+), e dois avisos que
+nunca sao omitidos: **expulsao** (o historico nao tem cartoes, a taxa nao a
+considera) e **amostra fina**. Todo campo do Scanner sem equivalente
+historico e listado em `ignorados`.
+
+### No Scanner
+
+O site Futebol carrega `motor1/motor1.js` e `motor1/linha_do_tempo.json`. Um
+gancho de uma linha no fim do `scanRodar` acrescenta duas colunas:
+
+- **Motor 1** — odd justa empirica, diferenca % contra a justa atual, n e taxa
+- **M1 base** — filtros usados, IC95 em odd, ⚠ com os avisos
+
+Passar o mouse na linha mostra o placar relativo, a odd justa do favorito, a
+distribuicao de gols a mais e os campos sem base.
+
+## Testes
+
+```bash
+python -m venv .venv && .venv/Scripts/python -m pip install mini-racer pytest
+.venv/Scripts/python -m pytest testes
+```
+
+| Arquivo | Cobre |
 |---|---|
-| 44 | 43,5% |
-| **45** | **44,5%** |
-| 46 | 47,3% |
-| 47 | 48,3% |
+| `test_motor1.py` | regras em jogos sinteticos com resposta conhecida: convencao de minuto, gol de acrescimo do 1o tempo, gol contra, placar relativo ao favorito, escada, avisos |
+| `test_paridade.py` | o `motor1.js` real num V8 embutido contra o Python, 150 consultas no banco real, campo a campo |
+| `test_dados.py` | placar reconstruido = oficial; tempo dos gols = placar oficial do intervalo; o JSON do site = o banco |
+| `test_integracao_scanner.py` | o `scanParse` **extraido do index.html publicado** le uma Tabela Live e entrega ao Motor 1 sem traducao; colunas entram na tabela; o gancho esta no HTML e no gerador |
 
-Logo `LIMITE_HT = 45`. **O mecanismo da anomalia nao foi resolvido.** Se parte
-dela for acrescimo do 1o tempo rotulado como 46, o under HT aparece ganhando um
-pouco mais do que ganha de verdade — e o vies e otimista, que e a direcao ruim.
-Resolver isso exige uma fonte com meia-tempo explicito.
+O `mini-racer` segura o processo vivo na saida se o contexto V8 nao for
+fechado; os fixtures fecham com `ctx.close()`.
 
-## Arquivos
+## Motor 2
 
-| Arquivo | O que faz |
-|---|---|
-| `coletar_understat.py` | jogos + chutes para `futebol.db`. Cache em `cache/`, resumivel, pula o que ja coletou. |
-| `coletar_odds.py` | odds pre-live e casamento por data + apelido de time. |
-| `motor.py` | reconstrucao de estado e calculo da odd justa. |
-| `ajustar.py` | busca em grade dos parametros e ablacao de componentes. |
-| `avaliar.py` | diagnostico, calibragem, bootstrap e exemplo de uso. |
-
-`cache/`, `*.db` e `*.csv` estao no `.gitignore` — o banco se reconstroi dos
-scripts.
-
-## O modelo
-
-```
-P(sem mais gol) = exp(-Lambda_resto)
-Lambda_resto = lambda_jogo * fracao_do_perfil(t, fim) * aj_xg * aj_placar
-```
-
-1. **`lambda_jogo`** — gols totais esperados, extraidos do par over/under 2.5
-   de fechamento: tira o overround, acha `P(over 2.5)` e resolve por bisseccao
-   o `lambda` que a reproduz num Poisson. Sem odds, cai na media da amostra.
-2. **`fracao_do_perfil(t, fim)`** — o perfil `r(s)` de intensidade ao longo do
-   jogo e **medido nos gols reais da amostra** (suavizado em janela de 9 min),
-   nao postulado como reta.
-3. **`aj_xg`** — razao entre o xG acumulado ate `t` e o que se esperava do
-   jogo, amortecida por um prior. A referencia usa a escala do **proprio xG da
-   amostra** (3,25/jogo) e nao o lambda das odds (3,06/jogo): sao numeros
-   diferentes, e compara-los diretamente introduzia vies.
-   **Peso ajustado: 0 — rejeitado pelos dados.** Ver abaixo.
-4. **`aj_placar`** — efeito do placar por estado (`0x0`, `empate_com_gol`,
-   `dif1`, `dif2+`), calibrado para que a **media de `P(zero gols)`** bata com
-   a frequencia observada de under.
-
-Odd minima, com a comissao da exchange descontada:
-`1 + (1-p) / (p * (1 - comissao))`.
-
-### Por que calibrar em P e nao em gols
-
-A primeira versao calibrava o efeito de placar pela razao
-`gols observados / gols previstos`, o que acerta a media de `lambda`. Isso esta
-errado: a grandeza de interesse e `exp(-lambda)`, e **`exp` e convexa**, logo
-`E[exp(-lambda)] != exp(-E[lambda])`. Acertar a media de `lambda` deixava a
-media de `P` alta demais, e a calibragem mostrava o modelo super-estimando o
-under em 3 a 4 pontos em quase toda faixa. A calibragem agora resolve por
-bisseccao o multiplicador `m` tal que
-`media_i exp(-m * lambda_i) = taxa observada`, e o vies sistematico desapareceu.
-
-## Resultado do piloto (EPL 2024, 380 jogos)
-
-Banco: 380 jogos, 9.878 chutes, 1.081 gols (2,84/jogo), 100% com odds pre-live.
-`lambda` pre-live: mediana 3,04, faixa 2,15 a 4,36.
-
-**Ablacao fora da amostra** (treino 266 jogos / teste 114, divididos por data;
-parametros escolhidos por validacao interna que nunca viu o teste):
-
-| Modelo | Brier | vs plano |
-|---|---|---|
-| Poisson plano (lambda medio, sem odds) | 0,20081 | — |
-| lambda pre-live, sem ajuste | 0,20039 | +0,21% |
-| lambda + xG | 0,20039 | +0,21% |
-| lambda + placar | **0,19963** | **+0,59%** |
-| lambda + xG + placar | 0,19963 | +0,59% |
-
-**Duas conclusoes honestas:**
-
-1. **O ajuste por xG foi rejeitado.** Na busca em grade o Brier de validacao
-   piora monotonicamente com o peso (0,2135 em peso 0 contra 0,2194 em peso 1),
-   para todo prior testado. Como especificado, o xG acumulado nao agrega
-   informacao sobre o placar e o `lambda` pre-live.
-2. **O ganho total nao se distingue de zero.** Bootstrap de 4.000 reamostragens
-   **por jogo** (minutos do mesmo jogo sao correlacionados, reamostrar
-   observacoes infla a precisao): diferenca media de Brier `-0,00118`, IC95%
-   `[-0,00620, +0,00406]`. O intervalo cruza zero.
-
-Ou seja: uma temporada **nao sustenta** a afirmacao de que o condicionamento
-por estado bate um Poisson plano. O que o piloto estabelece e que a
-infraestrutura funciona, que a calibragem esta sem vies sistematico fora da
-amostra, e que os efeitos de placar medidos tem a direcao plausivel
-(`ft empate_com_gol` x0,76 — jogo empatado 1x1 sai menos gol que o modelo
-preve, igual ao que o projeto antigo achou nos backtests).
-
-## Proximos passos, em ordem de retorno
-
-1. **Volume.** 380 jogos -> ~24 mil (6 ligas x 12 temporadas) e ~65x mais
-   amostra. E o unico caminho para sair do "nao distinguivel de zero". Crawl de
-   ~7 h a 1 req/s, resumivel. So depois disso faz sentido julgar o modelo.
-2. **Refazer o xG como taxa recente, nao nivel acumulado.** A especificacao
-   atual compara niveis, que e redundante com o placar. xG nos ultimos 10-15
-   minutos mede pressao corrente, que e o que o acumulado nao captura.
-3. **Chutes no alvo como sinal separado.** Esta no banco e nao foi usado.
-4. **Resolver a anomalia do minuto 46**, porque o vies que ela gera e otimista
-   no HT.
-5. **Coletor ao vivo**, se ROI medido importar. Unica fonte possivel de preco
-   ao vivo, e so acumula para frente.
-
-Observacoes do mesmo jogo em minutos diferentes sao correlacionadas, entao os
-`n` das tabelas de calibragem sao maiores que o numero de jogos independentes;
-leia-os como volume, nao como precisao estatistica.
+`motor.py`, `ajustar.py` e `avaliar.py` sao o piloto de 1 temporada (EPL 2024)
+e **precisam ser refeitos**: contam so `Goal` (ignoram gol contra), usam o
+corte fixo em 45 e descrevem o placar sem referencia ao favorito. No piloto,
+o ganho sobre um Poisson plano nao se distinguiu de zero (IC95 do bootstrap
+por jogo cruzou zero) e o ajuste por xG acumulado foi rejeitado pela busca em
+grade. O papel dele daqui em diante e reproduzir o Motor 1 onde ha amostra.

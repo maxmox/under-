@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS odds_pre (
   bfe_o25 REAL, bfe_u25 REAL,
   p_over25 REAL, lambda_jogo REAL,
   escanteios_casa INTEGER, escanteios_fora INTEGER,
+  -- placar oficial do intervalo: corrige o tempo dos gols (consolidar.py)
+  ht_casa_fd INTEGER, ht_fora_fd INTEGER,
+  -- vermelhos no jogo inteiro (SEM minuto: nao serve de filtro ao vivo)
+  verm_casa INTEGER, verm_fora INTEGER,
   FOREIGN KEY (jogo_id) REFERENCES jogo(id)
 );
 """
@@ -217,12 +221,14 @@ def processa(con, liga, temporada, div=None, temp_fd=None):
         u25f = val(r, "u25f") or val(r, "u25")
         p_over, lam = lambda_de_over25(o25f, u25f)
         con.execute(
-            "INSERT OR REPLACE INTO odds_pre VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO odds_pre VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (jid, val(r, "oc"), val(r, "oe"), val(r, "o_f"),
              val(r, "ocf"), val(r, "oef"), val(r, "off_"),
              val(r, "o25"), val(r, "u25"), o25f, u25f,
              val(r, "bfe_o25"), val(r, "bfe_u25"), p_over, lam,
-             inteiro(r, "HC"), inteiro(r, "AC")))
+             inteiro(r, "HC"), inteiro(r, "AC"),
+             inteiro(r, "HTHG"), inteiro(r, "HTAG"),
+             inteiro(r, "HR"), inteiro(r, "AR")))
         ok += 1
     con.commit()
     return {"liga": liga, "temporada": temporada, "div": div, "temp_fd": temp_fd,
@@ -233,6 +239,8 @@ def processa(con, liga, temporada, div=None, temp_fd=None):
 
 def main():
     con = sqlite3.connect(DB)
+    # sempre recria: sai barato (CSVs em cache) e evita esquema velho
+    con.executescript("DROP TABLE IF EXISTS odds_pre;")
     con.executescript(ESQUEMA)
     if len(sys.argv) > 2:  # modo manual: divisao + temporada do football-data
         div, temp_fd = sys.argv[1], sys.argv[2]
