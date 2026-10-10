@@ -11,7 +11,7 @@ import json, os, re, sqlite3, sys, time, urllib.request, gzip, io
 BASE = "https://understat.com"
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "futebol.db")
-PAUSA = 1.0  # segundos entre requests — educado com o servidor
+PAUSA = float(os.environ.get("PAUSA", "0.7"))  # segundos entre requests
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS jogo (
@@ -94,7 +94,7 @@ def coleta(liga, temporada):
                      _f(s.get("X")), _f(s.get("Y"))),
                 )
         novos += 1
-        if novos % 25 == 0:
+        if novos % 20 == 0:
             con.commit()
             print(f"  {i}/{len(jogos)} ({novos} novos)")
     con.commit()

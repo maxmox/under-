@@ -2,3 +2,4 @@ cache/
 *.db
 __pycache__/
 *.csv
+*.log
